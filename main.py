@@ -22,11 +22,11 @@ STRING_SESSION = os.environ.get("STRING_SESSION")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")           
 PORT = int(os.environ.get("PORT", 8080))
 
-# --- LOGGING (Reduced for Performance) ---
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- CLIENT SETUP (MAXIMUM PERFORMANCE) ---
+# --- CLIENT SETUP (SPEED OPTIMIZED) ---
 user_client = TelegramClient(
     StringSession(STRING_SESSION), 
     API_ID, 
@@ -35,10 +35,10 @@ user_client = TelegramClient(
     use_ipv6=False,
     connection_retries=None, 
     flood_sleep_threshold=60,
-    request_retries=15,  # Increased
+    request_retries=10,
     auto_reconnect=True,
-    timeout=30,  # Faster timeout
-    receive_updates=False  # Disable unnecessary updates
+    timeout=45,  # Balanced timeout
+    receive_updates=False  # Disable updates for speed
 )
 
 bot_client = TelegramClient(
@@ -49,10 +49,10 @@ bot_client = TelegramClient(
     use_ipv6=False,
     connection_retries=None, 
     flood_sleep_threshold=60,
-    request_retries=15,  # Increased
+    request_retries=10,
     auto_reconnect=True,
-    timeout=30,
-    receive_updates=False  # Disable unnecessary updates
+    timeout=45,
+    receive_updates=False
 )
 
 # --- GLOBAL STATE ---
@@ -73,7 +73,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logger.warning(f"Web server started on port {PORT}")
+    logger.info(f"Web server started on port {PORT}")
 
 # --- HELPER FUNCTIONS ---
 def human_readable_size(size):
@@ -90,12 +90,12 @@ def time_formatter(seconds):
     if hours > 0: return f"{hours}h {minutes}m {seconds}s"
     return f"{minutes}m {seconds}s"
 
-# --- PROGRESS CALLBACK (Optimized) ---
+# --- PROGRESS CALLBACK ---
 async def progress_callback(current, total, start_time, file_name):
     global last_update_time, status_message
     now = time.time()
     
-    if now - last_update_time < 8: return  # Reduced update frequency (5s -> 8s)
+    if now - last_update_time < 5: return 
     last_update_time = now
     
     percentage = current * 100 / total if total > 0 else 0
@@ -116,7 +116,7 @@ async def progress_callback(current, total, start_time, file_name):
         )
     except Exception: pass
 
-# --- ULTRA BUFFERED STREAM (Enhanced) ---
+# --- ULTRA BUFFERED STREAM (OPTIMIZED) ---
 class UltraBufferedStream:
     def __init__(self, client, location, file_size, file_name, start_time):
         self.client = client
@@ -125,8 +125,8 @@ class UltraBufferedStream:
         self.name = file_name
         self.start_time = start_time
         self.current_bytes = 0
-        self.chunk_size = 16 * 1024 * 1024  # 16MB Chunk (was 8MB)
-        self.queue = asyncio.Queue(maxsize=8)  # Increased buffer (was 5)
+        self.chunk_size = 12 * 1024 * 1024  # 12MB - Sweet spot between 8 and 16
+        self.queue = asyncio.Queue(maxsize=6)  # Balanced buffer
         self.downloader_task = asyncio.create_task(self._worker())
         self.buffer = b""
 
@@ -159,7 +159,7 @@ class UltraBufferedStream:
 
 # --- SMART FORMAT ENFORCER ---
 def get_target_info(message):
-    """Format enforcement with caching optimization"""
+    """Format enforcement logic"""
     original_name = "Unknown_File"
     target_mime = "application/octet-stream"
     force_video = False
@@ -202,147 +202,113 @@ def get_target_info(message):
         
     return final_name, target_mime, force_video
 
-# --- PARALLEL TRANSFER PROCESS (NEW!) ---
-async def process_single_message(message, source_id, dest_id, sem):
-    """Process single message with semaphore control"""
-    async with sem:
-        retries = 3
-        success = False
-        
-        while retries > 0 and not success:
-            try:
-                fresh_msg = await user_client.get_messages(source_id, ids=message.id)
-                if not fresh_msg: break 
-
-                file_name, mime_type, is_video_mode = get_target_info(fresh_msg)
-                
-                if not file_name:
-                    if fresh_msg.text:
-                        await bot_client.send_message(dest_id, fresh_msg.text)
-                        success = True
-                    else:
-                        success = True
-                    continue
-
-                start_time = time.time()
-                
-                attributes = []
-                attributes.append(DocumentAttributeFilename(file_name=file_name))
-                
-                if hasattr(fresh_msg, 'document') and fresh_msg.document:
-                    for attr in fresh_msg.document.attributes:
-                        if isinstance(attr, DocumentAttributeVideo):
-                            attributes.append(DocumentAttributeVideo(
-                                duration=attr.duration,
-                                w=attr.w,
-                                h=attr.h,
-                                supports_streaming=True
-                            ))
-
-                # Thumbnail download optimized (smaller size)
-                thumb = await user_client.download_media(fresh_msg, thumb=-1) if is_video_mode else None
-                
-                media_obj = fresh_msg.media.document if hasattr(fresh_msg.media, 'document') else fresh_msg.media.photo
-                
-                stream_file = UltraBufferedStream(
-                    user_client, 
-                    media_obj,
-                    fresh_msg.file.size,
-                    file_name,
-                    start_time
-                )
-                
-                await bot_client.send_file(
-                    dest_id,
-                    file=stream_file,
-                    caption=fresh_msg.text or "",
-                    attributes=attributes,
-                    thumb=thumb,
-                    supports_streaming=True,
-                    file_size=fresh_msg.file.size,
-                    force_document=not is_video_mode,
-                    part_size_kb=16384  # Increased (was 8192)
-                )
-                
-                if thumb and os.path.exists(thumb): os.remove(thumb)
-                success = True
-
-            except (errors.FileReferenceExpiredError, errors.MediaEmptyError):
-                logger.warning(f"Ref Expired on {message.id}, refreshing...")
-                retries -= 1
-                await asyncio.sleep(1)  # Reduced from 2s
-                continue 
-                
-            except errors.FloodWaitError as e:
-                logger.warning(f"FloodWait {e.seconds}s")
-                await asyncio.sleep(e.seconds)
-            
-            except Exception as e:
-                logger.error(f"Failed {message.id}: {e}")
-                retries -= 1
-                await asyncio.sleep(1)
-
-        return success, message.id
-
-# --- TRANSFER PROCESS (Parallel Processing) ---
+# --- TRANSFER PROCESS (SEQUENTIAL BUT FAST) ---
 async def transfer_process(event, source_id, dest_id, start_msg, end_msg):
     global is_running, status_message
     
     status_message = await event.respond(f"🔥 **Format Enforcer Engine Started!**\nSource: `{source_id}`")
     total_processed = 0
-    failed_messages = []
-    
-    # Semaphore for parallel control (3 concurrent transfers)
-    sem = asyncio.Semaphore(3)
     
     try:
-        # Fetch all messages first (batch operation)
-        messages = []
         async for message in user_client.iter_messages(source_id, min_id=start_msg-1, max_id=end_msg+1, reverse=True):
-            if not is_running: break
-            if not getattr(message, 'action', None):
-                messages.append(message)
-        
-        # Process in parallel batches
-        tasks = []
-        for message in messages:
-            if not is_running: break
-            task = asyncio.create_task(process_single_message(message, source_id, dest_id, sem))
-            tasks.append(task)
+            if not is_running:
+                await status_message.edit("🛑 **Stopped by User!**")
+                break
+
+            if getattr(message, 'action', None): continue
+
+            # --- RETRY LOOP (No Skip) ---
+            retries = 3
+            success = False
             
-            # Process in batches of 10
-            if len(tasks) >= 10:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, tuple) and result[0]:
-                        total_processed += 1
-                    elif isinstance(result, tuple):
-                        failed_messages.append(result[1])
-                tasks = []
-                
-                # Update status
+            while retries > 0 and not success:
                 try:
-                    await status_message.edit(
-                        f"⚡️ **Processing...**\n"
-                        f"✅ Done: `{total_processed}`\n"
-                        f"❌ Failed: `{len(failed_messages)}`"
+                    # 1. REFRESH MESSAGE
+                    fresh_msg = await user_client.get_messages(source_id, ids=message.id)
+                    if not fresh_msg: break 
+
+                    # 2. GET ENFORCED FORMAT INFO
+                    file_name, mime_type, is_video_mode = get_target_info(fresh_msg)
+                    
+                    # Handle Text Only
+                    if not file_name:
+                        if fresh_msg.text:
+                            await bot_client.send_message(dest_id, fresh_msg.text)
+                            success = True
+                        else:
+                            success = True
+                        continue
+
+                    await status_message.edit(f"🔍 **Converting:** `{file_name}`\nAttempt: {4-retries}")
+
+                    start_time = time.time()
+                    
+                    # 3. PREPARE ATTRIBUTES
+                    attributes = []
+                    attributes.append(DocumentAttributeFilename(file_name=file_name))
+                    
+                    if hasattr(fresh_msg, 'document') and fresh_msg.document:
+                        for attr in fresh_msg.document.attributes:
+                            if isinstance(attr, DocumentAttributeVideo):
+                                attributes.append(DocumentAttributeVideo(
+                                    duration=attr.duration,
+                                    w=attr.w,
+                                    h=attr.h,
+                                    supports_streaming=True
+                                ))
+
+                    # 4. STREAM & UPLOAD
+                    thumb = await user_client.download_media(fresh_msg, thumb=-1)
+                    
+                    media_obj = fresh_msg.media.document if hasattr(fresh_msg.media, 'document') else fresh_msg.media.photo
+                    
+                    stream_file = UltraBufferedStream(
+                        user_client, 
+                        media_obj,
+                        fresh_msg.file.size,
+                        file_name,
+                        start_time
                     )
+                    
+                    await bot_client.send_file(
+                        dest_id,
+                        file=stream_file,
+                        caption=fresh_msg.text or "",
+                        attributes=attributes,
+                        thumb=thumb,
+                        supports_streaming=True,
+                        file_size=fresh_msg.file.size,
+                        force_document=not is_video_mode,
+                        part_size_kb=10240  # 10MB - Optimized sweet spot
+                    )
+                    
+                    if thumb and os.path.exists(thumb): os.remove(thumb)
+                    success = True
+                    await status_message.edit(f"✅ **Sent:** `{file_name}`")
+
+                except (errors.FileReferenceExpiredError, errors.MediaEmptyError):
+                    logger.warning(f"Ref Expired on {message.id}, refreshing...")
+                    retries -= 1
+                    await asyncio.sleep(2)
+                    continue 
+                    
+                except errors.FloodWaitError as e:
+                    logger.warning(f"FloodWait {e.seconds}s")
+                    await asyncio.sleep(e.seconds)
+                
+                except Exception as e:
+                    logger.error(f"Failed {message.id}: {e}")
+                    retries -= 1
+                    await asyncio.sleep(2)
+
+            if not success:
+                try: await bot_client.send_message(event.chat_id, f"❌ **FAILED:** `{message.id}` - Could not process after 3 attempts.")
                 except: pass
-        
-        # Process remaining tasks
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, tuple) and result[0]:
-                    total_processed += 1
-                elif isinstance(result, tuple):
-                    failed_messages.append(result[1])
+            
+            total_processed += 1
 
         if is_running:
-            status_text = f"✅ **Job Done!**\nTotal Processed: `{total_processed}`"
-            if failed_messages:
-                status_text += f"\n❌ Failed: `{len(failed_messages)}` messages"
-            await status_message.edit(status_text)
+            await status_message.edit(f"✅ **Job Done!**\nTotal Processed: `{total_processed}`")
 
     except Exception as e:
         await status_message.edit(f"❌ **Critical Error:** {e}")
@@ -390,5 +356,5 @@ if __name__ == '__main__':
     user_client.start()
     loop.create_task(start_web_server())
     bot_client.start(bot_token=BOT_TOKEN)
-    logger.warning("Bot is Running...")
+    logger.info("Bot is Running...")
     bot_client.run_until_disconnected()
